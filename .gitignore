@@ -1,0 +1,8 @@
+build/
+*.aig
+*.aag
+*.o
+*.obj
+*.exe
+*.ilk
+*.pdb

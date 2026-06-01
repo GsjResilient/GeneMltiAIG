@@ -10,6 +10,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -35,11 +36,6 @@ struct ExpandedCircuit {
     Aag aag;
     Lit left = 0;
     Lit right = 0;
-};
-
-struct MaterializedRootCircuit {
-    Lit group1_root = 0;
-    Lit group2_root = 0;
 };
 
 void print_usage(std::ostream& os) {
@@ -283,13 +279,116 @@ XorMatch resolve_roots(const Aag& graph, const Options& options) {
     return *match;
 }
 
-MaterializedRootCircuit materialize_root_circuit(NetworkCopier& copier, Lit root) {
-    return MaterializedRootCircuit{copier.copy_lit(root, 1), copier.copy_lit(root, 2)};
-}
+enum class FilterShape {
+    Left,
+    Right
+};
 
-Lit build_difference_filter(AigBuilder& builder, const MaterializedRootCircuit& circuit) {
-    return builder.add_and(circuit.group1_root, invert_lit(circuit.group2_root));
-}
+class RecursiveReplacer {
+public:
+    RecursiveReplacer(const Aag& source,
+                      AigBuilder& builder,
+                      NetworkCopier& copier,
+                      FilterShape shape)
+        : source_(source), builder_(builder), copier_(copier), shape_(shape) {}
+
+    Lit replace_lit(Lit lit) {
+        if (source_.positive_and(lit) == nullptr) {
+            return build_leaf_difference(lit);
+        }
+        return replace_positive_and(lit);
+    }
+
+private:
+    struct FilterInput {
+        bool replaced = false;
+        Lit value = 0;
+        Lit group1 = 0;
+        Lit group2 = 0;
+    };
+
+    Lit replace_positive_and(Lit lit) {
+        const std::uint32_t var = lit_var(lit);
+        const auto cached = replacements_.find(var);
+        if (cached != replacements_.end()) {
+            return cached->second;
+        }
+
+        const AndGate* gate = source_.positive_and(lit);
+        if (gate == nullptr) {
+            throw AigError("Expected a positive AND literal during recursive replacement");
+        }
+
+        const FilterInput lhs = build_filter_input(gate->rhs0);
+        const FilterInput rhs = build_filter_input(gate->rhs1);
+        const Lit replacement = shape_ == FilterShape::Left
+                                    ? build_left_filter(lhs, rhs)
+                                    : build_right_filter(lhs, rhs);
+        replacements_[var] = replacement;
+        return replacement;
+    }
+
+    FilterInput build_filter_input(Lit lit) {
+        if (source_.positive_and(lit) != nullptr) {
+            return FilterInput{true, replace_positive_and(lit), 0, 0};
+        }
+        return FilterInput{false, 0, copier_.copy_lit(lit, 1), copier_.copy_lit(lit, 2)};
+    }
+
+    Lit build_leaf_difference(Lit lit) {
+        const Lit group1 = copier_.copy_lit(lit, 1);
+        const Lit group2 = copier_.copy_lit(lit, 2);
+        return builder_.add_and(group1, invert_lit(group2));
+    }
+
+    Lit build_left_filter(const FilterInput& lhs, const FilterInput& rhs) {
+        if (lhs.replaced && rhs.replaced) {
+            return builder_.add_and(lhs.value, rhs.value);
+        }
+        if (lhs.replaced) {
+            return and3(lhs.value, rhs.group1, invert_lit(rhs.group2));
+        }
+        if (rhs.replaced) {
+            return and3(rhs.value, lhs.group1, invert_lit(lhs.group2));
+        }
+
+        const Lit group1_and = builder_.add_and(lhs.group1, rhs.group1);
+        const Lit term0 = builder_.add_and(group1_and, invert_lit(lhs.group2));
+        const Lit term1 = builder_.add_and(group1_and, invert_lit(rhs.group2));
+        return builder_.add_or(term0, term1);
+    }
+
+    Lit build_right_filter(const FilterInput& lhs, const FilterInput& rhs) {
+        if (lhs.replaced && rhs.replaced) {
+            return builder_.add_and(lhs.value, builder_.add_or(rhs.value, 0));
+        }
+        if (lhs.replaced) {
+            return factored3(lhs.value, rhs.group1, rhs.group2);
+        }
+        if (rhs.replaced) {
+            return factored3(rhs.value, lhs.group1, lhs.group2);
+        }
+
+        const Lit y_or = builder_.add_or(invert_lit(lhs.group2), invert_lit(rhs.group2));
+        return builder_.add_and(lhs.group1, builder_.add_and(rhs.group1, y_or));
+    }
+
+    Lit and3(Lit a, Lit b, Lit c) {
+        return builder_.add_and(builder_.add_and(a, b), c);
+    }
+
+    Lit factored3(Lit replaced, Lit group1, Lit group2) {
+        const Lit replaced_or_group2 = builder_.add_or(replaced, group2);
+        const Lit group1_or_group2 = builder_.add_or(group1, group2);
+        return and3(replaced_or_group2, group1_or_group2, invert_lit(group2));
+    }
+
+    const Aag& source_;
+    AigBuilder& builder_;
+    NetworkCopier& copier_;
+    FilterShape shape_;
+    std::unordered_map<std::uint32_t, Lit> replacements_;
+};
 
 ExpandedCircuit expand_circuit(const Aag& source, Lit lhs_root, Lit rhs_root) {
     AigBuilder builder; //创建一个新电路构造器。后面所有新 input、新 gate 都会通过它生成，而不是直接修改原始 source
@@ -306,11 +405,11 @@ ExpandedCircuit expand_circuit(const Aag& source, Lit lhs_root, Lit rhs_root) {
     }
 
     NetworkCopier copier(source, builder, group1_inputs, group2_inputs);
-    const MaterializedRootCircuit lhs_circuit = materialize_root_circuit(copier, lhs_root);
-    const MaterializedRootCircuit rhs_circuit = materialize_root_circuit(copier, rhs_root);
+    RecursiveReplacer lhs_replacer(source, builder, copier, FilterShape::Left);
+    RecursiveReplacer rhs_replacer(source, builder, copier, FilterShape::Right);
 
-    const Lit left = build_difference_filter(builder, lhs_circuit);
-    const Lit right = build_difference_filter(builder, rhs_circuit);
+    const Lit left = lhs_replacer.replace_lit(lhs_root);
+    const Lit right = rhs_replacer.replace_lit(rhs_root);
     const Lit output = builder.add_xor(left, right);
 
     return ExpandedCircuit{builder.to_aag({output}), left, right};

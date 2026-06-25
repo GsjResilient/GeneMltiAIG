@@ -1,3 +1,0 @@
-/mnt/home/guansj/GeneAIG/GeneMltiAIG/CMakeFiles/edit_cache.dir
-/mnt/home/guansj/GeneAIG/GeneMltiAIG/CMakeFiles/rebuild_cache.dir
-/mnt/home/guansj/GeneAIG/GeneMltiAIG/CMakeFiles/ec_expand.dir

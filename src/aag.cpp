@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 namespace gene_multi_aig {
 namespace {
@@ -276,9 +277,17 @@ Lit AigBuilder::add_or(Lit lhs, Lit rhs) {
 }
 
 Lit AigBuilder::add_xor(Lit lhs, Lit rhs) {
+    return add_xor_with_trace(lhs, rhs).output;
+}
+
+XorBuildResult AigBuilder::add_xor_with_trace(Lit lhs, Lit rhs) {
     const Lit lhs_and_not_rhs = add_and(lhs, invert_lit(rhs));
     const Lit not_lhs_and_rhs = add_and(invert_lit(lhs), rhs);
-    return add_or(lhs_and_not_rhs, not_lhs_and_rhs);
+    const Lit or_and = add_and(invert_lit(lhs_and_not_rhs), invert_lit(not_lhs_and_rhs));
+    return XorBuildResult{
+        invert_lit(or_and),
+        {lhs_and_not_rhs, not_lhs_and_rhs, or_and},
+    };
 }
 
 Aag AigBuilder::to_aag(const std::vector<Lit>& outputs) const {
@@ -294,26 +303,38 @@ Aag AigBuilder::to_aag(const std::vector<Lit>& outputs) const {
 
 NetworkCopier::NetworkCopier(const Aag& source,
                              AigBuilder& builder,
-                             std::vector<Lit> group1_inputs,
-                             std::vector<Lit> group2_inputs)
-    : source_(source), builder_(builder) {
-    if (group1_inputs.size() != source.inputs.size() ||
-        group2_inputs.size() != source.inputs.size()) {
-        throw AigError("Input copy maps do not match source input count");
+                             std::vector<std::vector<Lit>> group_inputs)
+    : source_(source), builder_(builder), group_maps_(group_inputs.size()) {
+    if (group_inputs.empty()) {
+        throw AigError("At least one copy group is required");
     }
 
-    for (std::size_t i = 0; i < source.inputs.size(); ++i) {
-        group_maps_[0][lit_var(source.inputs[i])] = group1_inputs[i];
-        group_maps_[1][lit_var(source.inputs[i])] = group2_inputs[i];
+    for (std::size_t group = 0; group < group_inputs.size(); ++group) {
+        if (group_inputs[group].size() != source.inputs.size()) {
+            throw AigError("Input copy maps do not match source input count");
+        }
+
+        for (std::size_t i = 0; i < source.inputs.size(); ++i) {
+            group_maps_[group][lit_var(source.inputs[i])] = group_inputs[group][i];
+        }
     }
 }
+
+NetworkCopier::NetworkCopier(const Aag& source,
+                             AigBuilder& builder,
+                             std::vector<Lit> group1_inputs,
+                             std::vector<Lit> group2_inputs)
+    : NetworkCopier(source,
+                    builder,
+                    std::vector<std::vector<Lit>>{std::move(group1_inputs),
+                                                  std::move(group2_inputs)}) {}
 
 Lit NetworkCopier::copy_lit(Lit source_lit, int group) {
     if (source_lit == 0U || source_lit == 1U) {
         return source_lit;
     }
-    if (group != 1 && group != 2) {
-        throw AigError("Copy group must be 1 or 2");
+    if (group < 1 || static_cast<std::size_t>(group) > group_maps_.size()) {
+        throw AigError("Copy group is out of range: " + std::to_string(group));
     }
 
     const Lit positive = copy_positive_var(lit_var(source_lit), group);
@@ -321,7 +342,7 @@ Lit NetworkCopier::copy_lit(Lit source_lit, int group) {
 }
 
 Lit NetworkCopier::copy_positive_var(std::uint32_t source_var, int group) {
-    auto& map = group_maps_[group - 1];
+    auto& map = group_maps_[static_cast<std::size_t>(group - 1)];
     const auto existing = map.find(source_var);
     if (existing != map.end()) {
         return existing->second;

@@ -61,12 +61,18 @@ struct XorMatch {
 
 std::optional<XorMatch> match_xor(const Aag& graph, Lit lit);
 
+struct XorBuildResult {
+    Lit output = 0;
+    std::vector<Lit> internal_vars;
+};
+
 class AigBuilder {
 public:
     Lit add_input();
     Lit add_and(Lit lhs, Lit rhs);
     Lit add_or(Lit lhs, Lit rhs);
     Lit add_xor(Lit lhs, Lit rhs);
+    XorBuildResult add_xor_with_trace(Lit lhs, Lit rhs);
 
     Aag to_aag(const std::vector<Lit>& outputs) const;
     std::uint32_t max_var() const { return next_var_ - 1U; }
@@ -81,6 +87,10 @@ class NetworkCopier {
 public:
     NetworkCopier(const Aag& source,
                   AigBuilder& builder,
+                  std::vector<std::vector<Lit>> group_inputs);
+
+    NetworkCopier(const Aag& source,
+                  AigBuilder& builder,
                   std::vector<Lit> group1_inputs,
                   std::vector<Lit> group2_inputs);
 
@@ -91,7 +101,7 @@ private:
 
     const Aag& source_;
     AigBuilder& builder_;
-    std::unordered_map<std::uint32_t, Lit> group_maps_[2];
+    std::vector<std::unordered_map<std::uint32_t, Lit>> group_maps_;
 };
 
 } // namespace gene_multi_aig

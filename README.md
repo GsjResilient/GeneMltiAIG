@@ -33,6 +33,23 @@ ec_expand --in input.aig --out expanded.aig --fastlec /path/to/fastLEC
 
 `--fastlec` is required. `ec_expand` runs `fastLEC` in `SAT_sweeping` mode before expansion, writes its output to a temporary log under `--tmp-dir`, and parses the log to require exactly one potential-equivalence class. If the input is not unique, the tool reports the fastLEC log path and stops. After constructing the output, it runs the same check on the generated AIGER and reports whether the output is unique; that post-check is informational and does not stop the run. `--keep-temp` keeps the logs for inspection.
 
+## Batch Expansion
+
+Use `scripts/batch_expand.sh` to expand a list of AIG files from one input directory:
+
+```bash
+scripts/batch_expand.sh \
+  --input-dir ./cases \
+  --list ./aig_list.txt \
+  --out-dir ./expanded \
+  --aigtoaig ../aiger/aigtoaig \
+  --fastlec ../fastLEC/build/bin/fastLEC
+```
+
+The list file contains one AIG filename or relative path per line. Empty lines and lines starting with `#` are ignored. For `test_15_TOP32_72.aig`, the expanded output is written as `test_15_TOP32_72_expanded.aig`; relative subdirectories in the list are preserved under `--out-dir`.
+
+Pass `--sub-out-dir ./sub_aigs` to also generate sub-AIG files for each expanded output.
+
 ## Construction
 
 For an input miter root pair `(a, b)`, the tool creates two independent copies of the original PI set:

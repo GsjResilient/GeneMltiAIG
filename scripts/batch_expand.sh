@@ -16,6 +16,7 @@ Options:
   --ec-expand PATH     Path to ec_expand [default: build/ec_expand]
   --tmp-dir DIR        Temporary directory [default: OUT_DIR/tmp]
   --sub-out-dir DIR    Generate sub-AIGs under DIR/<input-stem>/
+  --sub-var-file FILE  Enumerate variables listed in FILE for sub-AIGs
   --keep-temp          Keep ec_expand temporary files
   --verbose            Print ec_expand progress details
   --help               Show this help
@@ -33,6 +34,7 @@ fastlec=""
 ec_expand="${repo_dir}/build/ec_expand"
 tmp_dir=""
 sub_out_dir=""
+sub_var_file=""
 keep_temp=0
 verbose=0
 
@@ -102,6 +104,14 @@ while [[ $# -gt 0 ]]; do
             sub_out_dir="${1#*=}"
             shift
             ;;
+        --sub-var-file)
+            sub_var_file="$2"
+            shift 2
+            ;;
+        --sub-var-file=*)
+            sub_var_file="${1#*=}"
+            shift
+            ;;
         --keep-temp)
             keep_temp=1
             shift
@@ -151,6 +161,14 @@ if [[ ! -x "$aigtoaig" ]]; then
 fi
 if [[ ! -x "$fastlec" ]]; then
     echo "batch_expand: fastLEC is not executable: $fastlec" >&2
+    exit 2
+fi
+if [[ -n "$sub_var_file" && -z "$sub_out_dir" ]]; then
+    echo "batch_expand: --sub-var-file requires --sub-out-dir" >&2
+    exit 2
+fi
+if [[ -n "$sub_var_file" && ! -f "$sub_var_file" ]]; then
+    echo "batch_expand: sub-variable file does not exist: $sub_var_file" >&2
     exit 2
 fi
 
@@ -225,6 +243,9 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
     )
     if [[ -n "$sub_out_dir" ]]; then
         cmd+=(--sub-out-dir "$sub_dir")
+    fi
+    if [[ -n "$sub_var_file" ]]; then
+        cmd+=(--sub-var-file "$sub_var_file")
     fi
     if [[ "$keep_temp" -eq 1 ]]; then
         cmd+=(--keep-temp)

@@ -4,11 +4,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,7 @@ struct Options {
     fs::path output;
     fs::path tmp_dir;
     fs::path sub_out_dir;
+    fs::path sub_var_file;
     std::string aigtoaig = "aigtoaig";
     fs::path fastlec;
     unsigned fastlec_cores = 8;
@@ -56,7 +59,8 @@ void print_usage(std::ostream& os) {
        << "  --fastlec-timeout S   Timeout seconds for fastLEC validation [default: 100]\n"
        << "  --copies N            Number of independent copies [default: 2]\n"
        << "  --tmp-dir DIR         Directory for temporary AAG files\n"
-       << "  --sub-out-dir DIR     Generate sub-AIGs by enumerating final XOR internals\n"
+       << "  --sub-out-dir DIR     Generate sub-AIGs by enumerating selected variables\n"
+       << "  --sub-var-file FILE   Enumerate variables listed in FILE for sub-AIGs\n"
        << "  --keep-temp           Keep temporary AAG files and validation logs\n"
        << "  --direct-copy-or      Copy the input N times and OR the copied outputs\n"
        << "  --lhs-lit L           Explicit left miter root literal\n"
@@ -91,6 +95,34 @@ unsigned parse_unsigned_arg(const std::string& value, const std::string& option)
         throw AigError("Invalid unsigned value for " + option + ": " + value);
     }
     return static_cast<unsigned>(parsed);
+}
+
+std::uint32_t parse_var_token(const std::string& value,
+                              const fs::path& path,
+                              std::size_t line_number) {
+    std::size_t consumed = 0;
+    unsigned long parsed = 0;
+    try {
+        parsed = std::stoul(value, &consumed, 10);
+    } catch (const std::exception&) {
+        throw AigError("Invalid variable in " + path.string() + ":" +
+                       std::to_string(line_number) + ": " + value);
+    }
+    if (consumed != value.size() || parsed > UINT32_MAX) {
+        throw AigError("Invalid variable in " + path.string() + ":" +
+                       std::to_string(line_number) + ": " + value);
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+std::string trim_ws(std::string value) {
+    const char* whitespace = " \t\r\n";
+    const std::size_t first = value.find_first_not_of(whitespace);
+    if (first == std::string::npos) {
+        return {};
+    }
+    const std::size_t last = value.find_last_not_of(whitespace);
+    return value.substr(first, last - first + 1U);
 }
 
 Options parse_options(int argc, char** argv) {
@@ -136,6 +168,8 @@ Options parse_options(int argc, char** argv) {
             options.tmp_dir = *value;
         } else if (const auto value = option_value("--sub-out-dir")) {
             options.sub_out_dir = *value;
+        } else if (const auto value = option_value("--sub-var-file")) {
+            options.sub_var_file = *value;
         } else if (arg == "--keep-temp") {
             options.keep_temp = true;
         } else if (arg == "--direct-copy-or") {
@@ -172,8 +206,11 @@ Options parse_options(int argc, char** argv) {
     if (options.copies < 2U) {
         throw AigError("--copies must be at least 2");
     }
-    if (!options.sub_out_dir.empty() && options.direct_copy_or) {
-        throw AigError("--sub-out-dir is only supported in normal XOR expansion mode");
+    if (!options.sub_var_file.empty() && options.sub_out_dir.empty()) {
+        throw AigError("--sub-var-file requires --sub-out-dir");
+    }
+    if (!options.sub_out_dir.empty() && options.direct_copy_or && options.sub_var_file.empty()) {
+        throw AigError("--direct-copy-or with --sub-out-dir requires --sub-var-file");
     }
     return options;
 }
@@ -482,28 +519,86 @@ fs::path sub_aig_path(const fs::path& output,
 
 void remove_if_exists(const fs::path& path);
 
+std::vector<Lit> read_sub_var_file(const Aag& base, const fs::path& path) {
+    std::ifstream input(path);
+    if (!input) {
+        throw AigError("Failed to open sub-variable file: " + path.string());
+    }
+
+    std::vector<Lit> variables;
+    std::unordered_set<std::uint32_t> seen;
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(input, line)) {
+        ++line_number;
+        const std::size_t comment = line.find('#');
+        if (comment != std::string::npos) {
+            line = line.substr(0, comment);
+        }
+        line = trim_ws(std::move(line));
+        if (line.empty()) {
+            continue;
+        }
+
+        const std::uint32_t var = parse_var_token(line, path, line_number);
+        if (var == 0U) {
+            throw AigError("Sub-variable file contains constant variable 0 at " +
+                           path.string() + ":" + std::to_string(line_number));
+        }
+        if (var > UINT32_MAX / 2U) {
+            throw AigError("Sub-variable is too large to encode as an AIGER literal at " +
+                           path.string() + ":" + std::to_string(line_number));
+        }
+        if (!base.has_var(var)) {
+            throw AigError("Sub-variable does not exist in expanded AIG at " +
+                           path.string() + ":" + std::to_string(line_number) +
+                           ": " + std::to_string(var));
+        }
+        if (!seen.insert(var).second) {
+            throw AigError("Duplicate sub-variable in " + path.string() + ":" +
+                           std::to_string(line_number) + ": " + std::to_string(var));
+        }
+        variables.push_back(var * 2U);
+    }
+
+    if (variables.empty()) {
+        throw AigError("Sub-variable file did not contain any variables: " + path.string());
+    }
+
+    return variables;
+}
+
+std::vector<Lit> select_sub_aig_variables(const Aag& base,
+                                          const std::vector<Lit>& auto_vars,
+                                          const Options& options) {
+    if (!options.sub_var_file.empty()) {
+        return read_sub_var_file(base, options.sub_var_file);
+    }
+    return auto_vars;
+}
+
 void write_sub_aigs(const Aag& base,
-                    const std::vector<Lit>& internal_vars,
+                    const std::vector<Lit>& variables,
                     const Options& options) {
     if (options.sub_out_dir.empty()) {
         return;
     }
-    if (internal_vars.size() > 20U) {
+    if (variables.size() > 20U) {
         throw AigError("Refusing to generate more than 2^20 sub-AIG files");
     }
 
     fs::create_directories(options.sub_out_dir);
 
-    const std::uint64_t total = 1ULL << internal_vars.size();
+    const std::uint64_t total = 1ULL << variables.size();
     for (std::uint64_t mask = 0; mask < total; ++mask) {
         std::vector<Lit> units;
-        units.reserve(internal_vars.size());
-        for (std::size_t i = 0; i < internal_vars.size(); ++i) {
+        units.reserve(variables.size());
+        for (std::size_t i = 0; i < variables.size(); ++i) {
             const bool value = (mask & (1ULL << i)) != 0U;
-            units.push_back(value ? internal_vars[i] : invert_lit(internal_vars[i]));
+            units.push_back(value ? variables[i] : invert_lit(variables[i]));
         }
 
-        const std::string bits = assignment_bits(mask, internal_vars.size());
+        const std::string bits = assignment_bits(mask, variables.size());
         const fs::path sub_aig = sub_aig_path(options.output, options.sub_out_dir, bits);
         const fs::path sub_aag = make_temp_path(options.tmp_dir, "_sub.aag");
         write_aag(constrain_output_with_units(base, units), sub_aag);
@@ -699,7 +794,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        write_sub_aigs(expanded.aag, expanded.final_xor_internal_vars, options);
+        write_sub_aigs(
+            expanded.aag,
+            select_sub_aig_variables(expanded.aag, expanded.final_xor_internal_vars, options),
+            options);
 
         if (options.verbose) {
             std::cerr << "[ec_expand] wrote " << options.output << '\n';

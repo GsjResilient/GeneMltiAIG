@@ -41,6 +41,11 @@ struct ExpandedCircuit {
     std::vector<Lit> final_xor_internal_vars;
 };
 
+struct AndRootPattern {
+    const AndGate* gate = nullptr;
+    bool inverted = false;
+};
+
 void print_usage(std::ostream& os) {
     os << "Usage: ec_expand --in input.aig --out expanded.aig [options]\n"
        << "\n"
@@ -362,6 +367,61 @@ Lit build_right_replacement(AigBuilder& builder, Lit a21, Lit a22, Lit b11, Lit 
     return builder.add_or(r2, r4);
 }
 
+Lit build_and3(AigBuilder& builder, Lit a, Lit b, Lit c) {
+    return builder.add_and(a, builder.add_and(b, c));
+}
+
+Lit build_cross_and4(AigBuilder& builder, Lit x0, Lit x1, Lit y0, Lit y1) {
+    return builder.add_and(builder.add_and(x0, y0), builder.add_and(x1, y1));
+}
+
+Lit build_cross_negated_product(AigBuilder& builder, Lit x0, Lit x1, Lit y0, Lit y1) {
+    std::vector<Lit> terms;
+    terms.reserve(4U);
+    terms.push_back(builder.add_and(invert_lit(x0), invert_lit(y0)));
+    terms.push_back(builder.add_and(invert_lit(x0), invert_lit(y1)));
+    terms.push_back(builder.add_and(invert_lit(x1), invert_lit(y0)));
+    terms.push_back(builder.add_and(invert_lit(x1), invert_lit(y1)));
+    return build_balanced_or(builder, std::move(terms));
+}
+
+std::optional<AndRootPattern> match_and_root(const Aag& source, Lit root) {
+    if (root == 0U || root == 1U) {
+        return std::nullopt;
+    }
+    const AndGate* gate = source.and_by_var(lit_var(root));
+    if (gate == nullptr) {
+        return std::nullopt;
+    }
+    return AndRootPattern{gate, lit_is_inverted(root)};
+}
+
+Lit build_embedded_root_difference(NetworkCopier& copier,
+                                   AigBuilder& builder,
+                                   const AndRootPattern& root,
+                                   int root_group,
+                                   const AndRootPattern& other,
+                                   int other_group) {
+    const Lit x0 = copier.copy_lit(root.gate->rhs0, root_group);
+    const Lit x1 = copier.copy_lit(root.gate->rhs1, root_group);
+    const Lit y0 = copier.copy_lit(other.gate->rhs0, other_group);
+    const Lit y1 = copier.copy_lit(other.gate->rhs1, other_group);
+
+    if (!root.inverted && !other.inverted) {
+        return build_left_replacement(builder, x0, x1, y0, y1);
+    }
+    if (!root.inverted && other.inverted) {
+        return build_cross_and4(builder, x0, x1, y0, y1);
+    }
+    if (root.inverted && !other.inverted) {
+        return build_cross_negated_product(builder, x0, x1, y0, y1);
+    }
+
+    const Lit term0 = build_and3(builder, y0, y1, invert_lit(x0));
+    const Lit term1 = build_and3(builder, y1, y0, invert_lit(x1));
+    return builder.add_or(term0, term1);
+}
+
 std::pair<Lit, Lit> build_generic_replacements(NetworkCopier& copier,
                                                 AigBuilder& builder,
                                                 Lit lhs_root,
@@ -474,21 +534,28 @@ ExpandedCircuit expand_circuit(const Aag& source,
 
     Lit left = 0;
     Lit right = 0;
-    const AndGate* lhs_gate = source.positive_and(lhs_root);
-    const AndGate* rhs_gate = source.positive_and(rhs_root);
-    if (lhs_gate != nullptr && rhs_gate != nullptr) {
-        const Lit a11 = copier.copy_lit(lhs_gate->rhs0, 1);
-        const Lit a12 = copier.copy_lit(lhs_gate->rhs1, 1);
-        const Lit a21 = copier.copy_lit(rhs_gate->rhs0, 1);
-        const Lit a22 = copier.copy_lit(rhs_gate->rhs1, 1);
+    const auto lhs_pattern = match_and_root(source, lhs_root);
+    const auto rhs_pattern = match_and_root(source, rhs_root);
+    if (lhs_pattern && rhs_pattern) {
+        if (!lhs_pattern->inverted && !rhs_pattern->inverted) {
+            const Lit a11 = copier.copy_lit(lhs_pattern->gate->rhs0, 1);
+            const Lit a12 = copier.copy_lit(lhs_pattern->gate->rhs1, 1);
+            const Lit a21 = copier.copy_lit(rhs_pattern->gate->rhs0, 1);
+            const Lit a22 = copier.copy_lit(rhs_pattern->gate->rhs1, 1);
 
-        const Lit b11 = copier.copy_lit(lhs_gate->rhs0, 2);
-        const Lit b12 = copier.copy_lit(lhs_gate->rhs1, 2);
-        const Lit b21 = copier.copy_lit(rhs_gate->rhs0, 2);
-        const Lit b22 = copier.copy_lit(rhs_gate->rhs1, 2);
+            const Lit b11 = copier.copy_lit(lhs_pattern->gate->rhs0, 2);
+            const Lit b12 = copier.copy_lit(lhs_pattern->gate->rhs1, 2);
+            const Lit b21 = copier.copy_lit(rhs_pattern->gate->rhs0, 2);
+            const Lit b22 = copier.copy_lit(rhs_pattern->gate->rhs1, 2);
 
-        left = build_left_replacement(builder, a11, a12, b21, b22);
-        right = build_right_replacement(builder, a21, a22, b11, b12);
+            left = build_left_replacement(builder, a11, a12, b21, b22);
+            right = build_right_replacement(builder, a21, a22, b11, b12);
+        } else {
+            left = build_embedded_root_difference(copier, builder, *lhs_pattern, 1,
+                                                  *rhs_pattern, 2);
+            right = build_embedded_root_difference(copier, builder, *rhs_pattern, 1,
+                                                   *lhs_pattern, 2);
+        }
     } else {
         const auto replacements =
             build_generic_replacements(copier, builder, lhs_root, rhs_root);

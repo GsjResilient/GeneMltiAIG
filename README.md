@@ -29,7 +29,7 @@ ec_expand --in input.aig --out expanded.aig --fastlec /path/to/fastLEC
 
 `--lhs-lit` and `--rhs-lit` are a fallback when the tool cannot recognize the input PO as an XOR miter. Normally the input must have exactly one PO, and that PO must be a common AIG encoding of `lhs XOR rhs`.
 
-Normal expansion preserves root literal polarity. If both miter roots are positive AND literals, `ec_expand` uses the embedded four-input replacement. If either root is inverted or otherwise not a positive AND literal, it uses a generic fallback that copies the literal with its polarity intact.
+Normal expansion preserves root literal polarity. If both miter roots are AND literals, positive or inverted, `ec_expand` uses an embedded polarity-aware replacement. If either root is not an AND literal, it uses a generic fallback that copies the literal with its polarity intact.
 
 `--sub-out-dir` generates sub-AIG files after the expanded output is built. The tool records the internal variables created by the final `left XOR right`, enumerates every assignment to those variables, and writes one `.aig` per assignment. Since AIGER has no CNF clause section, each sub-AIG encodes the unit constraints by replacing the single output with `original_out AND assigned_lit_0 AND assigned_lit_1 ...`.
 

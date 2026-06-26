@@ -325,15 +325,6 @@ std::vector<std::vector<Lit>> create_input_copies(AigBuilder& builder,
     return copies;
 }
 
-const AndGate& require_positive_and_root(const Aag& source, Lit root, const std::string& name) {
-    const AndGate* gate = source.positive_and(root);
-    if (gate == nullptr) {
-        throw AigError(name + " root must be a positive AND literal for four-input filtering: " +
-                       std::to_string(root));
-    }
-    return *gate;
-}
-
 Lit build_balanced_or(AigBuilder& builder, std::vector<Lit> leaves) {
     if (leaves.empty()) {
         return 0;
@@ -369,6 +360,19 @@ Lit build_right_replacement(AigBuilder& builder, Lit a21, Lit a22, Lit b11, Lit 
     const Lit r3 = builder.add_and(a22, invert_lit(b12));
     const Lit r4 = builder.add_and(a21, r3);
     return builder.add_or(r2, r4);
+}
+
+std::pair<Lit, Lit> build_generic_replacements(NetworkCopier& copier,
+                                                AigBuilder& builder,
+                                                Lit lhs_root,
+                                                Lit rhs_root) {
+    const Lit lhs_group1 = copier.copy_lit(lhs_root, 1);
+    const Lit rhs_group1 = copier.copy_lit(rhs_root, 1);
+    const Lit lhs_group2 = copier.copy_lit(lhs_root, 2);
+    const Lit rhs_group2 = copier.copy_lit(rhs_root, 2);
+    const Lit left = builder.add_and(lhs_group1, invert_lit(rhs_group2));
+    const Lit right = builder.add_and(rhs_group1, invert_lit(lhs_group2));
+    return {left, right};
 }
 
 Lit append_and_gate(Aag& graph, Lit lhs, Lit rhs) {
@@ -463,26 +467,34 @@ ExpandedCircuit expand_circuit(const Aag& source,
         throw AigError("Normal replacement mode currently supports exactly 2 copies");
     }
 
-    const AndGate& lhs_gate = require_positive_and_root(source, lhs_root, "left miter");
-    const AndGate& rhs_gate = require_positive_and_root(source, rhs_root, "right miter");
-
     AigBuilder builder; //创建一个新电路构造器。后面所有新 input、新 gate 都会通过它生成，而不是直接修改原始 source
     std::vector<std::vector<Lit>> inputs =
         create_input_copies(builder, source.inputs.size(), copy_count);
     NetworkCopier copier(source, builder, std::move(inputs));
 
-    const Lit a11 = copier.copy_lit(lhs_gate.rhs0, 1);
-    const Lit a12 = copier.copy_lit(lhs_gate.rhs1, 1);
-    const Lit a21 = copier.copy_lit(rhs_gate.rhs0, 1);
-    const Lit a22 = copier.copy_lit(rhs_gate.rhs1, 1);
+    Lit left = 0;
+    Lit right = 0;
+    const AndGate* lhs_gate = source.positive_and(lhs_root);
+    const AndGate* rhs_gate = source.positive_and(rhs_root);
+    if (lhs_gate != nullptr && rhs_gate != nullptr) {
+        const Lit a11 = copier.copy_lit(lhs_gate->rhs0, 1);
+        const Lit a12 = copier.copy_lit(lhs_gate->rhs1, 1);
+        const Lit a21 = copier.copy_lit(rhs_gate->rhs0, 1);
+        const Lit a22 = copier.copy_lit(rhs_gate->rhs1, 1);
 
-    const Lit b11 = copier.copy_lit(lhs_gate.rhs0, 2);
-    const Lit b12 = copier.copy_lit(lhs_gate.rhs1, 2);
-    const Lit b21 = copier.copy_lit(rhs_gate.rhs0, 2);
-    const Lit b22 = copier.copy_lit(rhs_gate.rhs1, 2);
+        const Lit b11 = copier.copy_lit(lhs_gate->rhs0, 2);
+        const Lit b12 = copier.copy_lit(lhs_gate->rhs1, 2);
+        const Lit b21 = copier.copy_lit(rhs_gate->rhs0, 2);
+        const Lit b22 = copier.copy_lit(rhs_gate->rhs1, 2);
 
-    const Lit left = build_left_replacement(builder, a11, a12, b21, b22);
-    const Lit right = build_right_replacement(builder, a21, a22, b11, b12);
+        left = build_left_replacement(builder, a11, a12, b21, b22);
+        right = build_right_replacement(builder, a21, a22, b11, b12);
+    } else {
+        const auto replacements =
+            build_generic_replacements(copier, builder, lhs_root, rhs_root);
+        left = replacements.first;
+        right = replacements.second;
+    }
     const XorBuildResult output = builder.add_xor_with_trace(left, right);
 
     return ExpandedCircuit{
@@ -567,8 +579,6 @@ int main(int argc, char** argv) {
                 std::cerr << "[ec_expand] miter roots: " << roots.lhs
                           << " XOR " << roots.rhs << '\n';
             }
-            require_positive_and_root(source, roots.lhs, "left miter");
-            require_positive_and_root(source, roots.rhs, "right miter");
 
             const ValidationResult input_validation =
                 validate_input_single_eq_pair(

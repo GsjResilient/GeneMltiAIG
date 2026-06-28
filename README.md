@@ -53,6 +53,20 @@ The list file contains one AIG filename or relative path per line. Empty lines a
 
 Pass `--sub-out-dir ./sub_aigs` to also generate sub-AIG files for each expanded output. Add `--sub-var-file ./vars.txt` to enumerate the same listed variables for every expanded AIG.
 
+## Standalone Sub-AIG Enumeration
+
+Use `aig_sub_enum` when the AIG is already generated and you only want to enumerate selected variables:
+
+```bash
+build/aig_sub_enum \
+  --in expanded.aig \
+  --vars vars.txt \
+  --out-dir ./sub_aigs \
+  --aigtoaig ../aiger/aigtoaig
+```
+
+The variable file has the same format as `--sub-var-file`: one existing variable number per line, with empty lines and `#` comments ignored. The tool writes `expanded_sub_<bits>.aig` files, where the bit order follows the variable file order.
+
 ## Construction
 
 For an input miter root pair `(a, b)`, the tool creates two independent copies of the original PI set:
